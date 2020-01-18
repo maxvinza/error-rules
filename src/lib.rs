@@ -178,6 +178,7 @@ struct ErrorRules {
     enum_id: Ident,
     prefix: String,
     from_list: TokenStream,
+    for_list: TokenStream,
     source_list: TokenStream,
     display_list: TokenStream,
 }
@@ -189,6 +190,7 @@ impl ErrorRules {
             enum_id: ident.clone(),
             prefix: String::default(),
             from_list: TokenStream::default(),
+            for_list: TokenStream::default(),
             source_list: TokenStream::default(),
             display_list: TokenStream::default(),
         }
@@ -262,6 +264,74 @@ impl ErrorRules {
         }
     }
 
+    fn impl_error_for_fields(&mut self,
+        item_id: &TokenStream,
+        variant: &syn::Variant)
+    {
+        let enum_id = &self.enum_id;
+
+        match &variant.fields {
+            syn::Fields::Unnamed(fields) => {
+                if fields.unnamed.len() != 1 {
+                    panic!("variant should contain one field")
+                }
+                let field = &fields.unnamed[0];
+                let ty = &field.ty;
+                self.for_list.extend(quote! {
+                    impl From<#enum_id> for #ty {
+                        #[inline]
+                        fn from(e: #enum_id) -> #ty { #ty::new(std::io::ErrorKind::Other, e) }
+                    }
+                });
+                self.source_list.extend(quote! {
+                    #item_id (i0) => Some(i0),
+                });
+            }
+            _ => panic!("field format mismatch"),
+        };
+    }
+
+    fn impl_error_for_path(&mut self,
+        item_id: &TokenStream,
+        variant: &syn::Variant)
+    {
+        self.impl_error_for_fields(&item_id, variant);
+
+        self.display_list.extend(quote! {
+            #item_id ( i0 ) => write!(f, "{}", i0),
+        });
+    }
+
+    fn impl_error_for_list(&mut self,
+        item_id: &TokenStream,
+        variant: &syn::Variant,
+        meta_list: &syn::MetaList)
+    {
+        if meta_list.nested.is_empty() {
+            self.impl_error_for_path(item_id, variant);
+            return
+        }
+
+        self.impl_error_for_fields(item_id, variant);
+
+        let w = impl_display_item(meta_list);
+        self.display_list.extend(quote! {
+            #item_id ( i0 ) => write!(f, #w),
+        });
+    }
+
+    fn impl_error_for(&mut self,
+        item_id: &TokenStream,
+        variant: &syn::Variant,
+        meta: &syn::Meta)
+    {
+        match meta {
+            syn::Meta::Path(_) => self.impl_error_for_path(item_id, variant),
+            syn::Meta::List(v) => self.impl_error_for_list(item_id, variant, v),
+            _ => panic!("meta format mismatch"),
+        }
+    }
+
     fn impl_error_kind_list(&mut self,
         item_id: &TokenStream,
         variant: &syn::Variant,
@@ -322,6 +392,17 @@ impl ErrorRules {
                     self.impl_error_kind(&item_id, variant, &meta);
                     break
                 }
+                "error_for" => {
+                    let meta = attr.parse_meta().unwrap();
+                    self.impl_error_for(&item_id, variant, &meta);
+                    break
+                }
+                "error_from_for" => {
+                    let meta = attr.parse_meta().unwrap();
+                    self.impl_error_from(&item_id, variant, &meta);
+                    self.impl_error_for(&item_id, variant, &meta);
+                    break
+                }
                 _ => {},
             }
         }
@@ -336,6 +417,7 @@ impl ErrorRules {
         let display_list = &self.display_list;
         let source_list = &self.source_list;
         let from_list = &self.from_list;
+        let for_list = &self.for_list;
 
         let mut display_prefix = TokenStream::new();
         if ! self.prefix.is_empty() {
@@ -365,6 +447,8 @@ impl ErrorRules {
             }
 
             #from_list
+
+            #for_list
         }
     }
 
@@ -387,7 +471,7 @@ impl ErrorRules {
 }
 
 
-#[proc_macro_derive(Error, attributes(error_from, error_kind, error_prefix))]
+#[proc_macro_derive(Error, attributes(error_from, error_for, error_from_for, error_kind, error_prefix))]
 pub fn error_rules_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as syn::DeriveInput);
 
